@@ -25,6 +25,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+import urllib.error
 from datetime import datetime, timezone, timedelta
 
 PROFILES = {
@@ -106,14 +107,18 @@ def find_grid_voltage(points):
             try:
                 return float(p.get("val")), p.get("title")
             except (TypeError, ValueError):
-                continue
+                return 0.0, p.get("title")  # при отключении бывает "--" или пусто
     return None, None
 
 
 def tg_send(text):
     url = f"https://api.telegram.org/bot{os.environ['TG_TOKEN']}/sendMessage"
     data = urllib.parse.urlencode({"chat_id": os.environ["TG_CHAT_ID"], "text": text}).encode()
-    http_json(url, data)
+    try:
+        http_json(url, data)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Telegram не принял сообщение: {e.code} "
+                           f"{e.read().decode(errors='ignore')} — проверьте TG_TOKEN и TG_CHAT_ID")
 
 
 def load_state(path):
