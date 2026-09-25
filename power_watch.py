@@ -156,7 +156,9 @@ def check(api, min_v, state_path):
         raise RuntimeError("Инверторы в аккаунте не найдены")
 
     pn, devcode, devaddr, sn, name = devs[0]
-    volts, title = find_grid_voltage(api.last_data(pn, devcode, devaddr, sn))
+    points = api.last_data(pn, devcode, devaddr, sn)
+    volts, title = find_grid_voltage(points)
+    data_ts = next((p.get("val") for p in points if p.get("title") == "Timestamp"), "?")
     if volts is None:
         raise RuntimeError("Не нашёл напряжение сети — запустите с --list")
 
@@ -175,10 +177,29 @@ def check(api, min_v, state_path):
             tg_send(f"🔌 Свет пропал ({stamp})\nБыл: {dur}")
         state["since"] = now
 
+    changed = prev != grid_on
     state["grid_on"] = grid_on
     save_state(state_path, state)
     print(f"{datetime.now(KYIV):%Y-%m-%d %H:%M:%S} {title}={volts} V -> "
-          f"{'есть' if grid_on else 'нет'}", flush=True)
+          f"{'есть' if grid_on else 'нет'} (данные инвертора от {data_ts})", flush=True)
+    return changed
+
+
+def git_commit_state(state_path):
+    """В GitHub Actions сразу сохраняем состояние в репозиторий."""
+    import subprocess
+    cmds = [
+        ["git", "config", "user.name", "power-watch"],
+        ["git", "config", "user.email", "power-watch@users.noreply.github.com"],
+        ["git", "add", state_path],
+        ["git", "commit", "-q", "-m", "state update"],
+        ["git", "pull", "-q", "--rebase", "-X", "theirs", "origin", "main"],
+        ["git", "push", "-q"],
+    ]
+    for c in cmds:
+        r = subprocess.run(c, capture_output=True, text=True)
+        if r.returncode != 0 and c[1] in ("push",):
+            print(f"Не удалось сохранить состояние: {r.stderr.strip()}", flush=True)
 
 
 def main():
@@ -200,6 +221,25 @@ def main():
         return
     if arg == "--once":
         check(api, min_v, state_path)
+        return
+    if arg == "--for":
+        # GitHub Actions: проверяем каждые POLL_SECONDS в течение N секунд
+        run_for = int(sys.argv[2]) if len(sys.argv) > 2 else 540
+        interval = int(os.getenv("POLL_SECONDS", "30"))
+        end, ok = time.time() + run_for, 0
+        while True:
+            try:
+                if check(api, min_v, state_path) and os.getenv("COMMIT_STATE"):
+                    git_commit_state(state_path)
+                ok += 1
+            except Exception as e:
+                print(f"Ошибка: {e}", flush=True)
+                api.token = None
+            if time.time() + interval > end:
+                break
+            time.sleep(interval)
+        if ok == 0:
+            sys.exit(1)  # ни одной успешной проверки — пусть запуск будет красным
         return
 
     interval = int(os.getenv("POLL_SECONDS", "60"))
