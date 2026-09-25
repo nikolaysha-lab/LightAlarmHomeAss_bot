@@ -113,12 +113,19 @@ def find_grid_voltage(points):
 
 def tg_send(text):
     url = f"https://api.telegram.org/bot{os.environ['TG_TOKEN']}/sendMessage"
-    data = urllib.parse.urlencode({"chat_id": os.environ["TG_CHAT_ID"], "text": text}).encode()
-    try:
-        http_json(url, data)
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"Telegram не принял сообщение: {e.code} "
-                           f"{e.read().decode(errors='ignore')} — проверьте TG_TOKEN и TG_CHAT_ID")
+    # в TG_CHAT_ID можно указать несколько id через запятую
+    ids = [c.strip() for c in os.environ["TG_CHAT_ID"].split(",") if c.strip()]
+    errors = []
+    for chat_id in ids:
+        data = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
+        try:
+            http_json(url, data)
+        except urllib.error.HTTPError as e:
+            errors.append(f"{chat_id}: {e.code} {e.read().decode(errors='ignore')}")
+    for err in errors:
+        print(f"Telegram не принял сообщение для {err}", flush=True)
+    if len(errors) == len(ids):  # не дошло никому — пробуем в следующий раз
+        raise RuntimeError("Telegram не принял сообщение — проверьте TG_TOKEN и TG_CHAT_ID")
 
 
 def load_state(path):
