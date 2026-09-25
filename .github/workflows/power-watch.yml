@@ -2,7 +2,7 @@ name: power-watch
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # каждые 5 минут (GitHub иногда запускает с опозданием)
+    - cron: "*/5 * * * *"   # запуск каждые 5 минут, каждый работает ~9 минут (с перекрытием)
   workflow_dispatch:         # кнопка ручного запуска
 
 permissions:
@@ -15,7 +15,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 13
     steps:
       - uses: actions/checkout@v5
 
@@ -31,7 +31,9 @@ jobs:
           TG_CHAT_ID: "${{ secrets.TG_CHAT_ID }},${{ secrets.TG_CHAT_ID_EXTRA }}"
           API_PROFILE: ${{ vars.API_PROFILE || 'dessmonitor' }}
           STATE_FILE: state.json
-        run: python power_watch.py --once
+          POLL_SECONDS: "30"
+          COMMIT_STATE: "1"
+        run: python power_watch.py --for 540
 
       - name: Сохранить состояние
         run: |
