@@ -1,0 +1,44 @@
+name: power-watch
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # каждые 5 минут (GitHub иногда запускает с опозданием)
+  workflow_dispatch:         # кнопка ручного запуска
+
+permissions:
+  contents: write            # чтобы сохранять state.json в репозиторий
+
+concurrency:
+  group: power-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Проверка сети
+        env:
+          SMARTESS_USER: ${{ secrets.SMARTESS_USER }}
+          SMARTESS_PASS: ${{ secrets.SMARTESS_PASS }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          API_PROFILE: ${{ vars.API_PROFILE || 'dessmonitor' }}
+          STATE_FILE: state.json
+        run: python power_watch.py --once
+
+      - name: Сохранить состояние
+        run: |
+          if [ -n "$(git status --porcelain state.json)" ]; then
+            git config user.name "power-watch"
+            git config user.email "power-watch@users.noreply.github.com"
+            git add state.json
+            git commit -m "state update"
+            git push
+          fi
