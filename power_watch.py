@@ -92,6 +92,11 @@ class SmartESS:
                                 c.get("alias") or plant.get("pname") or d["sn"]))
         return out
 
+    def ctrl_fields(self, pn, devcode, devaddr, sn):
+        return (self._call("queryDeviceCtrlField", {
+            "source": self.source, "pn": pn, "devcode": devcode, "devaddr": devaddr,
+            "sn": sn, "i18n": "en"}) or {}).get("field", [])
+
     def last_data(self, pn, devcode, devaddr, sn):
         return self._call("queryDeviceLastData", {
             "pn": pn, "devcode": devcode, "devaddr": devaddr, "sn": sn, "i18n": "en"}) or []
@@ -142,9 +147,18 @@ def save_state(path, state):
 
 
 def fmt_duration(sec):
-    sec = int(sec)
-    h, m = sec // 3600, (sec % 3600) // 60
-    return f"{h} ч {m} мин" if h else f"{m} мин"
+    sec = max(0, int(sec))
+    d, rem = divmod(sec, 86400)
+    h, rem = divmod(rem, 3600)
+    m = rem // 60
+    parts = []
+    if d:
+        parts.append(f"{d} д")
+    if h:
+        parts.append(f"{h} ч")
+    if m or not parts:
+        parts.append(f"{m} мин")
+    return " ".join(parts)
 
 
 def check(api, min_v, state_path):
@@ -172,9 +186,9 @@ def check(api, min_v, state_path):
     elif prev != grid_on:
         dur = fmt_duration(now - state.get("since", now))
         if grid_on:
-            tg_send(f"💡 Свет появился ({stamp}), {volts:.0f} В\nНе было: {dur}")
+            tg_send(f"🗼 Свет появился\n🕒 {stamp}\n⚡ {volts:.0f} В\n⏳ Не было: {dur}")
         else:
-            tg_send(f"🔌 Свет пропал ({stamp})\nБыл: {dur}")
+            tg_send(f"🔋 Свет пропал\n🕒 {stamp}\n⏳ Был: {dur}")
         state["since"] = now
 
     changed = prev != grid_on
@@ -210,10 +224,32 @@ def main():
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
 
     if arg == "--list":
-        for pn, devcode, devaddr, sn, name in api.devices():
-            print(f"\n=== {name} (sn {sn}, devcode {devcode})")
-            for p in api.last_data(pn, devcode, devaddr, sn):
-                print(f"  {p.get('title')}: {p.get('val')} {p.get('unit', '')}")
+        mask = lambda v: (str(v)[:4] + "***") if v else "?"
+        for plant in (api._call("queryPlants", {"pagesize": 50}) or {}).get("plant", []):
+            cols = api._call("webQueryCollectorsEs",
+                             {"pid": plant["pid"], "page": 0, "pagesize": 50}) or {}
+            for c in cols.get("collector", []):
+                print(f"\n##### Wi-Fi модуль pn={mask(c.get('pn'))}")
+                for k in ("alias", "fireware", "devcode", "status", "datFetch", "load"):
+                    if k in c:
+                        print(f"  {k}: {c[k]}")
+                devs = api._call("queryCollectorDevices", {"pn": c["pn"]}) or {}
+                for d in devs.get("dev", []):
+                    pn, devcode, devaddr, sn = c["pn"], d["devcode"], d["devaddr"], d["sn"]
+                    print(f"\n=== Инвертор sn={mask(sn)} devcode={devcode} devaddr={devaddr}")
+                    for k, v in d.items():
+                        if k not in ("sn", "pn"):
+                            print(f"  [dev] {k}: {v}")
+                    print("\n--- Текущие данные ---")
+                    for pt in api.last_data(pn, devcode, devaddr, sn):
+                        print(f"  {pt.get('title')}: {pt.get('val')} {pt.get('unit', '')}")
+                    print("\n--- Настройки инвертора ---")
+                    try:
+                        for f in api.ctrl_fields(pn, devcode, devaddr, sn):
+                            opts = ", ".join(str(i.get("val")) for i in (f.get("item") or []))
+                            print(f"  {f.get('name')}" + (f"  [варианты: {opts}]" if opts else ""))
+                    except Exception as e:
+                        print(f"  (не удалось получить настройки: {e})")
         return
     if arg == "--test":
         tg_send("✅ Бот оповещений о свете подключён")
