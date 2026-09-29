@@ -1,0 +1,20 @@
+name: inverter-info
+
+on:
+  workflow_dispatch:   # только ручной запуск: выводит в лог всё, что облако знает об инверторе
+
+jobs:
+  info:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Параметры инвертора
+        env:
+          SMARTESS_USER: ${{ secrets.SMARTESS_USER }}
+          SMARTESS_PASS: ${{ secrets.SMARTESS_PASS }}
+          API_PROFILE: ${{ vars.API_PROFILE || 'dessmonitor' }}
+        run: python power_watch.py --list
