@@ -230,7 +230,7 @@ def main():
                              {"pid": plant["pid"], "page": 0, "pagesize": 50}) or {}
             for c in cols.get("collector", []):
                 print(f"\n##### Wi-Fi модуль pn={mask(c.get('pn'))}")
-                for k in ("alias", "fireware", "devcode", "status", "datFetch", "load"):
+                for k in ("fireware", "devcode", "status", "load"):
                     if k in c:
                         print(f"  {k}: {c[k]}")
                 devs = api._call("queryCollectorDevices", {"pn": c["pn"]}) or {}
@@ -238,10 +238,12 @@ def main():
                     pn, devcode, devaddr, sn = c["pn"], d["devcode"], d["devaddr"], d["sn"]
                     print(f"\n=== Инвертор sn={mask(sn)} devcode={devcode} devaddr={devaddr}")
                     for k, v in d.items():
-                        if k not in ("sn", "pn"):
+                        if k not in ("sn", "pn", "alias", "devalias"):
                             print(f"  [dev] {k}: {v}")
                     print("\n--- Текущие данные ---")
                     for pt in api.last_data(pn, devcode, devaddr, sn):
+                        if str(pt.get("title")).lower() in ("id", "serial number", "sn"):
+                            continue  # лог публичный — серийники не выводим
                         print(f"  {pt.get('title')}: {pt.get('val')} {pt.get('unit', '')}")
                     print("\n--- Настройки инвертора ---")
                     try:
