@@ -188,7 +188,7 @@ def check(api, min_v, state_path):
         if grid_on:
             tg_send(f"🗼 Свет появился\n🕒 {stamp}\n⚡ {volts:.0f} В\n⏳ Не было: {dur}")
         else:
-            tg_send(f"🔋 Свет пропал\n🕒 {stamp}\n⏳ Был: {dur}")
+            tg_send(f"❌💡 Свет пропал\n🕒 {stamp}\n⏳ Был: {dur}")
         state["since"] = now
 
     changed = prev != grid_on
