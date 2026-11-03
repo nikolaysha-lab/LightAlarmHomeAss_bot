@@ -1,0 +1,34 @@
+name: build-jk-bridge
+
+on:
+  workflow_dispatch:   # ручной запуск: собирает прошивку для платы у батареи
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Установка ESPHome
+        run: pip install esphome
+      - name: Секреты
+        env:
+          BMS_KEY: ${{ secrets.BMS_KEY }}
+        run: |
+          # пока секретов нет — собираем тестовую прошивку с заглушками
+          printf 'bms_key: "%s"\n' "${BMS_KEY:-unset}" > esphome/secrets.yaml
+      - name: Сборка
+        run: esphome compile esphome/jk-bridge.yaml
+      - name: Файл прошивки
+        run: |
+          mkdir -p out
+          cp esphome/.esphome/build/jk-bridge/.pioenvs/jk-bridge/firmware.factory.bin out/jk-bridge.factory.bin
+          rm -f esphome/secrets.yaml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jk-bridge-firmware
+          path: out/jk-bridge.factory.bin
+          retention-days: 3
