@@ -25,7 +25,9 @@ jobs:
       - name: Файл прошивки
         run: |
           mkdir -p out
-          cp esphome/.esphome/build/jk-bridge/.pioenvs/jk-bridge/firmware.factory.bin out/jk-bridge.factory.bin
+          BIN=$(find esphome/.esphome -name '*factory*.bin' | head -1)
+          echo "Найдено: $BIN"; ls -la "$(dirname "$BIN")"
+          cp "$BIN" out/jk-bridge.factory.bin
           rm -f esphome/secrets.yaml
       - uses: actions/upload-artifact@v4
         with:
