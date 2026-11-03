@@ -1,0 +1,216 @@
+# Плата ESP32-C3 SuperMini рядом с JK BMS (JK-B2A8S20P, hw V11A).
+# Читает BMS по Bluetooth и раз в минуту отправляет данные боту на Cloudflare.
+# По току батареи быстро (~30 сек) определяет пропажу/появление света (инвертор в режиме Utility first).
+# Wi-Fi настраивается после прошивки (web.esphome.io -> Connect to Wi-Fi) или через точку "JK-Bridge-Setup".
+# Секрет bms_key подставляется при сборке на GitHub из Secrets (BMS_KEY).
+
+esphome:
+  name: jk-bridge
+  friendly_name: JK Bridge
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+external_components:
+  - source: github://syssi/esphome-jk-bms@main
+    components: [jk_bms_ble]
+    refresh: 1d
+
+logger:
+  level: INFO
+  hardware_uart: USB_SERIAL_JTAG
+  logs:
+    esp32_ble_tracker: WARN
+    esp32_ble_client: WARN
+
+wifi:
+  ap:
+    ssid: "JK-Bridge-Setup"
+    password: "jkbridge123"
+  reboot_timeout: 15min
+
+captive_portal:
+
+improv_serial:
+
+esp32_ble_tracker:
+  scan_parameters:
+    active: false
+
+ble_client:
+  - mac_address: "C8:47:80:1A:BE:1C"   # BMS «Nick»
+    id: client0
+
+jk_bms_ble:
+  - ble_client_id: client0
+    protocol_version: JK02_32S
+    throttle: 10s
+    id: bms0
+
+globals:
+  - id: pause_until
+    type: uint32_t
+    initial_value: "0"
+  # свет по току батареи: -1 неизвестно, 0 нет, 1 есть
+  - id: grid_state
+    type: int
+    initial_value: "-1"
+  - id: grid_cand
+    type: int
+    initial_value: "-1"
+  - id: grid_cnt
+    type: int
+    initial_value: "0"
+  - id: force_post
+    type: bool
+    initial_value: "false"
+
+http_request:
+  verify_ssl: true
+  timeout: 15s
+
+sensor:
+  - platform: wifi_signal
+    id: rssi
+    update_interval: 60s
+  - platform: jk_bms_ble
+    jk_bms_ble_id: bms0
+    state_of_charge:
+      id: soc
+    capacity_remaining:
+      id: remain_ah
+    full_charge_capacity:
+      id: capacity_ah
+    total_voltage:
+      id: voltage
+    current:
+      id: current
+    power:
+      id: power
+    min_cell_voltage:
+      id: cell_min
+    max_cell_voltage:
+      id: cell_max
+    temperature_sensor_1:
+      id: t1
+    temperature_sensor_2:
+      id: t2
+    mosfet_temperature:
+      id: mos_t
+    charging_cycles:
+      id: cycles
+
+binary_sensor:
+  - platform: jk_bms_ble
+    jk_bms_ble_id: bms0
+    balancing:
+      id: balancing
+    online_status:
+      id: bms_online
+
+switch:
+  - platform: ble_client
+    ble_client_id: client0
+    id: ble_switch
+    name: "BMS Bluetooth"
+    restore_mode: ALWAYS_ON
+
+script:
+  - id: send_data
+    mode: queued
+    max_runs: 2
+    then:
+      - http_request.post:
+          url: https://power-watch.nikolaysha.workers.dev/bms
+          request_headers:
+            X-Key: !secret bms_key
+            Content-Type: application/json
+          json: |-
+            bool ok = id(bms_online).has_state() && id(bms_online).state && id(soc).has_state() && !std::isnan(id(soc).state);
+            root["online"] = ok;
+            if (ok && id(grid_state) >= 0) root["grid"] = id(grid_state) == 1;
+            if (!std::isnan(id(rssi).state)) root["rssi"] = id(rssi).state;
+            if (ok) {
+              auto put = [&](const char *k, sensor::Sensor *s) {
+                if (s->has_state() && !std::isnan(s->state)) root[k] = s->state;
+              };
+              put("soc", id(soc));
+              put("remain_ah", id(remain_ah));
+              put("capacity_ah", id(capacity_ah));
+              put("voltage", id(voltage));
+              put("current", id(current));
+              put("power", id(power));
+              put("cell_min", id(cell_min));
+              put("cell_max", id(cell_max));
+              put("t1", id(t1));
+              put("t2", id(t2));
+              put("mos_t", id(mos_t));
+              put("cycles", id(cycles));
+              root["balancing"] = id(balancing).has_state() && id(balancing).state;
+            }
+          capture_response: true
+          max_response_buffer_size: 256
+          on_response:
+            then:
+              - lambda: |-
+                  if (response->status_code != 200) {
+                    ESP_LOGW("bridge", "Бот ответил %d", response->status_code);
+                    return;
+                  }
+                  json::parse_json(body, [](JsonObject root) -> bool {
+                    int pause = root["pause"] | 0;
+                    if (pause > 0) {
+                      id(pause_until) = millis() + (uint32_t) pause * 60000UL;
+                      if (id(ble_switch).state) {
+                        ESP_LOGI("bridge", "Отпускаем Bluetooth для приложения на %d мин", pause);
+                        id(ble_switch).turn_off();
+                      }
+                    }
+                    return true;
+                  });
+
+interval:
+  # Раз в минуту: отправляем данные боту
+  - interval: 60s
+    then:
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - script.execute: send_data
+  # Свет по току батареи: разряд > 0.8 А 30 сек = света нет; ток > -0.3 А 30 сек = свет есть
+  - interval: 10s
+    then:
+      - lambda: |-
+          if (!id(bms_online).has_state() || !id(bms_online).state || std::isnan(id(current).state)) return;
+          float a = id(current).state;
+          int obs = a < -0.8f ? 0 : (a > -0.3f ? 1 : id(grid_state));
+          if (obs < 0 || obs == id(grid_state)) { id(grid_cnt) = 0; return; }
+          if (obs != id(grid_cand)) { id(grid_cand) = obs; id(grid_cnt) = 1; } else { id(grid_cnt)++; }
+          if (id(grid_cnt) >= 3) {
+            id(grid_state) = obs; id(grid_cnt) = 0; id(force_post) = true;
+            ESP_LOGI("bridge", "Свет по батарее: %s (ток %.1f А)", obs ? "есть" : "нет", a);
+          }
+  # Срочная отправка при смене света
+  - interval: 5s
+    then:
+      - if:
+          condition:
+            lambda: 'return id(force_post);'
+          then:
+            - if:
+                condition:
+                  wifi.connected:
+                then:
+                  - lambda: 'id(force_post) = false;'
+                  - script.execute: send_data
+  # Возвращаем Bluetooth после паузы
+  - interval: 20s
+    then:
+      - lambda: |-
+          if (!id(ble_switch).state && (int32_t)(millis() - id(pause_until)) >= 0) {
+            ESP_LOGI("bridge", "Пауза закончилась, подключаемся к BMS");
+            id(ble_switch).turn_on();
+          }
