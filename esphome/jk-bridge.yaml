@@ -74,6 +74,16 @@ globals:
   - id: bot_ok
     type: bool
     initial_value: "true"
+  # энергия с момента включения платы, Вт·ч (бот считает по ним статистику)
+  - id: e_in
+    type: float
+    initial_value: "0"
+  - id: e_out
+    type: float
+    initial_value: "0"
+  - id: e_last
+    type: uint32_t
+    initial_value: "0"
 
 output:
   - platform: gpio
@@ -117,6 +127,22 @@ sensor:
       id: mos_t
     charging_cycles:
       id: cycles
+    cell_voltage_1:
+      id: c1
+    cell_voltage_2:
+      id: c2
+    cell_voltage_3:
+      id: c3
+    cell_voltage_4:
+      id: c4
+    cell_voltage_5:
+      id: c5
+    cell_voltage_6:
+      id: c6
+    cell_voltage_7:
+      id: c7
+    cell_voltage_8:
+      id: c8
 
 binary_sensor:
   - platform: jk_bms_ble
@@ -125,6 +151,16 @@ binary_sensor:
       id: balancing
     online_status:
       id: bms_online
+    charging:
+      id: chg_on
+    discharging:
+      id: dis_on
+
+text_sensor:
+  - platform: jk_bms_ble
+    jk_bms_ble_id: bms0
+    errors_bitmask_hex:
+      id: err_hex
 
 switch:
   - platform: ble_client
@@ -165,7 +201,15 @@ script:
               put("mos_t", id(mos_t));
               put("cycles", id(cycles));
               root["balancing"] = id(balancing).has_state() && id(balancing).state;
+              if (id(chg_on).has_state()) root["chg"] = id(chg_on).state;
+              if (id(dis_on).has_state()) root["dis"] = id(dis_on).state;
+              if (id(err_hex).has_state()) root["err"] = (uint32_t) strtoul(id(err_hex).state.c_str(), nullptr, 16);
+              JsonArray cells = root["cells"].to<JsonArray>();
+              for (auto *c : {id(c1), id(c2), id(c3), id(c4), id(c5), id(c6), id(c7), id(c8)})
+                cells.add(c->has_state() && !std::isnan(c->state) ? roundf(c->state * 1000) / 1000 : 0);
             }
+            root["e_in"] = roundf(id(e_in) * 10) / 10;
+            root["e_out"] = roundf(id(e_out) * 10) / 10;
           capture_response: true
           max_response_buffer_size: 256
           on_response:
@@ -204,8 +248,14 @@ interval:
   - interval: 10s
     then:
       - lambda: |-
+          uint32_t now = millis();
+          float dt = id(e_last) ? (now - id(e_last)) / 3600000.0f : 0; id(e_last) = now;
           if (!id(bms_online).has_state() || !id(bms_online).state || std::isnan(id(current).state)) return;
           float a = id(current).state;
+          if (!std::isnan(id(power).state) && dt > 0 && dt < 0.01f) {   // копим Вт·ч заряда/разряда
+            float pw = id(power).state;
+            if (pw > 0) id(e_in) += pw * dt; else id(e_out) += -pw * dt;
+          }
           int obs = a < -0.8f ? 0 : (a > -0.3f ? 1 : id(grid_state));
           if (obs < 0 || obs == id(grid_state)) { id(grid_cnt) = 0; return; }
           if (obs != id(grid_cand)) { id(grid_cand) = obs; id(grid_cnt) = 1; } else { id(grid_cnt)++; }
