@@ -3,6 +3,11 @@
 # По току батареи быстро (~30 сек) определяет пропажу/появление света (инвертор в режиме Utility first).
 # Wi-Fi настраивается после прошивки (web.esphome.io -> Connect to Wi-Fi) или через точку "JK-Bridge-Setup".
 # Секрет bms_key подставляется при сборке на GitHub из Secrets (BMS_KEY).
+# Синий светодиод:
+#   горит постоянно      — всё хорошо: BMS на связи, бот принимает данные
+#   медленно мигает (1 с) — Wi-Fi есть, но BMS по Bluetooth не видна
+#   двойная вспышка       — BMS видна, но бот не принимает данные (ключ/интернет)
+#   часто мигает          — нет Wi-Fi
 
 esphome:
   name: jk-bridge
@@ -66,6 +71,17 @@ globals:
   - id: force_post
     type: bool
     initial_value: "false"
+  - id: bot_ok
+    type: bool
+    initial_value: "true"
+
+output:
+  - platform: gpio
+    id: led
+    pin:
+      number: GPIO8
+      inverted: true
+      ignore_strapping_warning: true
 
 http_request:
   verify_ssl: true
@@ -155,6 +171,7 @@ script:
           on_response:
             then:
               - lambda: |-
+                  id(bot_ok) = response->status_code == 200;
                   if (response->status_code != 200) {
                     ESP_LOGW("bridge", "Бот ответил %d", response->status_code);
                     return;
@@ -170,6 +187,9 @@ script:
                     }
                     return true;
                   });
+          on_error:
+            then:
+              - lambda: 'id(bot_ok) = false;'
 
 interval:
   # Раз в минуту: отправляем данные боту
@@ -214,3 +234,15 @@ interval:
             ESP_LOGI("bridge", "Пауза закончилась, подключаемся к BMS");
             id(ble_switch).turn_on();
           }
+  # Синий светодиод — состояние платы
+  - interval: 100ms
+    then:
+      - lambda: |-
+          static uint32_t t = 0; t++;
+          bool on;
+          bool bms = id(bms_online).has_state() && id(bms_online).state;
+          if (!wifi::global_wifi_component->is_connected()) on = (t / 2) % 2 == 0;      // часто: нет Wi-Fi
+          else if (!bms) on = (t / 10) % 2 == 0;                                         // медленно: нет BMS
+          else if (!id(bot_ok)) { uint32_t p = t % 20; on = p < 2 || (p >= 4 && p < 6); } // двойная: бот не принимает
+          else on = true;                                                                 // всё хорошо
+          if (on) id(led).turn_on(); else id(led).turn_off();
