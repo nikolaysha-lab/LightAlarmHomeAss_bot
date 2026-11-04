@@ -24,7 +24,10 @@ const KEYBOARD = {
 };
 
 // Оповещения по заряду: от 60% каждые 10%, от 20% каждые 5%
-const SOC_LEVELS = [60, 50, 40, 30, 20, 15, 10, 5];
+const SOC_LEVELS = [60, 50, 40, 30, 20, 15, 10, 7];
+// Инвертор сам отключает батарею по напряжению: Battery Cut-off Voltage = 24,0 В (8S LiFePO4 → 3,0 В на банку ≈ 5%).
+// Всё «хватит на …» считаем только до этого запаса, а не до нуля.
+const INV_CUTOFF_V = 24.0, RESERVE_SOC = 5;
 const SOC_REARM = 3;          // порог снова «взводится», когда заряд поднялся выше него на 3%
 const BMS_STALE_MIN = 10;     // нет данных от платы дольше — сообщаем
 const BMS_SAVE_SEC = 240;     // данные батареи пишем в KV раз в 4 мин (+ сразу при важных событиях)
@@ -145,8 +148,9 @@ function timeCell(b) { // ⏱ хватит ~16 ч  /  ⏱ полная ~1,5 ч
   if (b.current == null || b.remain_ah == null) return null;
   const a = Math.abs(b.current);
   if (b.current < -GRID_OFF_A) {
-    if (b.avgW > 30 && b.voltage) return `⏱ хватит ${hours(b.remain_ah * b.voltage / b.avgW * 3600)} <i>(по средней ${Math.round(b.avgW)} Вт)</i>`;
-    return `⏱ хватит ${hours(b.remain_ah / a * 3600)}`;
+    const usable = Math.max(0, b.remain_ah - (b.capacity_ah || 0) * RESERVE_SOC / 100); // до отключения инвертора, а не до нуля
+    if (b.avgW > 30 && b.voltage) return `⏱ хватит ${hours(usable * b.voltage / b.avgW * 3600)} <i>(по средней ${Math.round(b.avgW)} Вт)</i>`;
+    return `⏱ хватит ${hours(usable / a * 3600)}`;
   }
   if (b.current > 0.5 && b.capacity_ah && b.soc < 99) return `⏱ полная ${hours(Math.max(0, b.capacity_ah - b.remain_ah) / a * 3600)}`;
   return null;
@@ -311,6 +315,7 @@ async function batteryText(env) {
   return msg([head, battHead(b), tc], quote(battTech(b)), quote(statsRows(b, st)),
     more([`⚙️ <b>Подробнее</b>`, ...cellsRows(b), sw,
           lrow("🕒", "Данные", `${fmtDuration(b.age)} назад`),
+          lrow("🛑", "Отключение", `инвертор при ${f1(INV_CUTOFF_V)} В (~${RESERVE_SOC}%)`),
           b.cycles != null ? lrow("🔁", "Циклов", String(b.cycles)) : null].filter(Boolean)));
 }
 
@@ -392,7 +397,8 @@ async function handleBms(request, env) {
     if (crossed.length) {
       const lvl = Math.min(...crossed);
       alerts.low = lvl; changed = true;
-      const title = lvl <= 10 ? "🪫‼️ <b>Батарея почти пуста</b>"
+      const title = lvl <= 7 ? `🪫‼️ <b>Инвертор вот-вот отключится</b> — при ~${RESERVE_SOC}% (${f1(INV_CUTOFF_V)} В)`
+                  : lvl <= 10 ? `🪫‼️ <b>Батарея почти пуста</b> — инвертор отключится при ~${RESERVE_SOC}%`
                   : lvl <= 20 ? "🪫 <b>Батарея садится</b> — пора экономить" : `🔋 <b>Заряд батареи ${lvl}%</b>`;
       const st = await enrich(env, b);
       const lh = st.grid_on !== undefined ? lightHead(st.grid_on, st.since ? fmtDuration(now - st.since) : "") : null;
