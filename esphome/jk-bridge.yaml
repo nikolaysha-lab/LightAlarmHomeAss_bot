@@ -9,6 +9,12 @@
 #   двойная вспышка       — BMS видна, но бот не принимает данные (ключ/интернет)
 #   часто мигает          — нет Wi-Fi
 
+# Обновление по Wi‑Fi: команда /update в боте -> плата скачивает прошивку с бота и перезагружается.
+# fw_ver подставляет сборка на GitHub (номер сборки), секреты fw_url/fw_md5_url — тоже.
+
+substitutions:
+  fw_ver: "dev"
+
 esphome:
   name: jk-bridge
   friendly_name: JK Bridge
@@ -19,9 +25,13 @@ esp32:
     type: esp-idf
 
 external_components:
-  - source: github://syssi/esphome-jk-bms@main
+  # закреплено на проверенной версии компонента (1 ноября 2026), чтобы чужие изменения не ломали сборку
+  - source:
+      type: git
+      url: https://github.com/syssi/esphome-jk-bms
+      ref: 6b5a25aa43fb044c2a9592a5e87f06f8edc42554
     components: [jk_bms_ble]
-    refresh: 1d
+    refresh: never
 
 logger:
   level: INFO
@@ -37,6 +47,9 @@ wifi:
   reboot_timeout: 15min
 
 captive_portal:
+
+ota:
+  - platform: http_request
 
 improv_serial:
 
@@ -74,6 +87,9 @@ globals:
   - id: bot_ok
     type: bool
     initial_value: "true"
+  - id: do_update
+    type: bool
+    initial_value: "false"
   # энергия с момента включения платы, Вт·ч (бот считает по ним статистику)
   - id: e_in
     type: float
@@ -189,6 +205,20 @@ switch:
     restore_mode: ALWAYS_ON
 
 script:
+  - id: fw_update
+    mode: single
+    then:
+      - logger.log: "Бот прислал команду обновления — качаем прошивку"
+      - lambda: 'id(pause_until) = millis() + 300000UL;'   # 5 мин не включать Bluetooth обратно
+      - switch.turn_off: ble_switch      # освобождаем память на время скачивания
+      - delay: 2s
+      - ota.http_request.flash:
+          md5_url: !secret fw_md5_url
+          url: !secret fw_url
+      # сюда доходим, только если обновиться не удалось (при успехе плата перезагрузится)
+      - logger.log: "Обновление не удалось"
+      - lambda: 'id(pause_until) = millis();'
+      - switch.turn_on: ble_switch
   - id: send_data
     mode: queued
     max_runs: 2
@@ -201,6 +231,7 @@ script:
           json: |-
             bool ok = id(bms_online).has_state() && id(bms_online).state && id(soc).has_state() && !std::isnan(id(soc).state);
             root["online"] = ok;
+            root["fw"] = "${fw_ver}";
             if (ok && id(grid_state) >= 0) root["grid"] = id(grid_state) == 1;
             if (!std::isnan(id(rssi).state)) root["rssi"] = id(rssi).state;
             if (ok) {
@@ -244,6 +275,7 @@ script:
                     return;
                   }
                   json::parse_json(body, [](JsonObject root) -> bool {
+                    if (root["update"] | false) id(do_update) = true;
                     int pause = root["pause"] | 0;
                     if (pause > 0) {
                       id(pause_until) = millis() + (uint32_t) pause * 60000UL;
@@ -267,7 +299,7 @@ interval:
             wifi.connected:
           then:
             - script.execute: send_data
-  # Свет по току батареи: разряд > 0.8 А 30 сек = света нет; ток > -0.3 А 30 сек = свет есть
+  # Свет по току батареи: разряд > 1.5 А 30 сек = света нет; ток > -0.5 А 30 сек = свет есть
   - interval: 10s
     then:
       - lambda: |-
@@ -279,13 +311,22 @@ interval:
             float pw = id(power).state;
             if (pw > 0) id(e_in) += pw * dt; else id(e_out) += -pw * dt;
           }
-          int obs = a < -0.8f ? 0 : (a > -0.3f ? 1 : id(grid_state));
+          int obs = a < -1.5f ? 0 : (a > -0.5f ? 1 : id(grid_state));
           if (obs < 0 || obs == id(grid_state)) { id(grid_cnt) = 0; return; }
           if (obs != id(grid_cand)) { id(grid_cand) = obs; id(grid_cnt) = 1; } else { id(grid_cnt)++; }
           if (id(grid_cnt) >= 3) {
             id(grid_state) = obs; id(grid_cnt) = 0; id(force_post) = true;
             ESP_LOGI("bridge", "Свет по батарее: %s (ток %.1f А)", obs ? "есть" : "нет", a);
           }
+  # Команда обновления от бота
+  - interval: 10s
+    then:
+      - if:
+          condition:
+            lambda: 'return id(do_update);'
+          then:
+            - lambda: 'id(do_update) = false;'
+            - script.execute: fw_update
   # Срочная отправка при смене света
   - interval: 5s
     then:
