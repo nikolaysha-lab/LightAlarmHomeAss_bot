@@ -13,24 +13,39 @@ jobs:
         with:
           python-version: "3.12"
       - name: Установка ESPHome
-        run: pip install esphome
+        run: pip install esphome && esphome version   # версию из лога потом можно закрепить
       - name: Секреты
         env:
           BMS_KEY: ${{ secrets.BMS_KEY }}
         run: |
           # пока секретов нет — собираем тестовую прошивку с заглушками
-          printf 'bms_key: "%s"\n' "${BMS_KEY:-unset}" > esphome/secrets.yaml
+          URL=https://power-watch.nikolaysha.workers.dev/fw
+          printf 'bms_key: "%s"\nfw_url: "%s/bin?k=%s"\nfw_md5_url: "%s/md5?k=%s"\n' \
+            "${BMS_KEY:-unset}" "$URL" "${BMS_KEY:-unset}" "$URL" "${BMS_KEY:-unset}" > esphome/secrets.yaml
       - name: Сборка
-        run: esphome compile esphome/jk-bridge.yaml
+        run: esphome -s fw_ver "${{ github.run_number }}" compile esphome/jk-bridge.yaml
       - name: Файл прошивки
         run: |
           mkdir -p out
           BIN=$(find esphome/.esphome -name '*factory*.bin' | head -1)
           echo "Найдено: $BIN"; ls -la "$(dirname "$BIN")"
-          cp "$BIN" out/jk-bridge.factory.bin
+          cp "$BIN" out/jk-bridge-${{ github.run_number }}.factory.bin
+          OTA=$(find esphome/.esphome -name 'firmware.ota.bin' | head -1)
+          [ -n "$OTA" ] || OTA=$(find esphome/.esphome -name 'firmware.bin' | head -1)
+          echo "Для Wi‑Fi: $OTA"; cp "$OTA" out/ota.bin
           rm -f esphome/secrets.yaml
+      - name: Отправить прошивку боту (для /update)
+        env:
+          BMS_KEY: ${{ secrets.BMS_KEY }}
+        run: |
+          [ -n "$BMS_KEY" ] || { echo "Нет BMS_KEY — пропускаю"; exit 0; }
+          curl -fsS -X POST https://power-watch.nikolaysha.workers.dev/fw/upload \
+            -H "X-Key: $BMS_KEY" -H "X-Ver: ${{ github.run_number }}" \
+            -H "X-Md5: $(md5sum out/ota.bin | cut -d' ' -f1)" \
+            --data-binary @out/ota.bin
+          echo; echo "Отправлено: сборка ${{ github.run_number }}"
       - uses: actions/upload-artifact@v4
         with:
           name: jk-bridge-firmware
-          path: out/jk-bridge.factory.bin
+          path: out/*.factory.bin
           retention-days: 3
