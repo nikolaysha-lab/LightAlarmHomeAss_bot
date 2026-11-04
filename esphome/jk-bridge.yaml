@@ -143,6 +143,25 @@ sensor:
       id: c7
     cell_voltage_8:
       id: c8
+    state_of_health:
+      id: soh
+    # сопротивление проводов балансировки (для отчёта о здоровье раз в месяц)
+    cell_resistance_1:
+      id: r1
+    cell_resistance_2:
+      id: r2
+    cell_resistance_3:
+      id: r3
+    cell_resistance_4:
+      id: r4
+    cell_resistance_5:
+      id: r5
+    cell_resistance_6:
+      id: r6
+    cell_resistance_7:
+      id: r7
+    cell_resistance_8:
+      id: r8
 
 binary_sensor:
   - platform: jk_bms_ble
@@ -207,6 +226,10 @@ script:
               JsonArray cells = root["cells"].to<JsonArray>();
               for (auto *c : {id(c1), id(c2), id(c3), id(c4), id(c5), id(c6), id(c7), id(c8)})
                 cells.add(c->has_state() && !std::isnan(c->state) ? roundf(c->state * 1000) / 1000 : 0);
+              put("soh", id(soh));
+              JsonArray res = root["res"].to<JsonArray>();
+              for (auto *r : {id(r1), id(r2), id(r3), id(r4), id(r5), id(r6), id(r7), id(r8)})
+                res.add(r->has_state() && !std::isnan(r->state) ? roundf(r->state * 1000) / 1000 : 0);
             }
             root["e_in"] = roundf(id(e_in) * 10) / 10;
             root["e_out"] = roundf(id(e_out) * 10) / 10;
