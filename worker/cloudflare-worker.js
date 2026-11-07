@@ -11,8 +11,8 @@
 const BASE = "https://api.dessmonitor.com/public/";
 const COMPANY_KEY = "bnrl_frRFjEz8Mkn";
 const MIN_VOLTAGE = 170;
-const STALE_MIN = 20; // столько минут без новых данных от SmartESS = потеря связи (облако само обновляется раз в 5–15 мин)
-const LINK_SAVE_SEC = 600; // отметку «данные SmartESS свежие» пишем в KV не чаще раза в 10 мин
+const STALE_MIN = 30; // столько минут без новых данных от SmartESS = потеря связи (облако само обновляется раз в 5–15 мин)
+const LINK_SAVE_SEC = 1200; // отметку «данные SmartESS свежие» пишем в KV не чаще раза в 20 мин
 
 const BTN_STATUS = "📊 Состояние";
 const BTN_BATTERY = "🔋 Батарея";
@@ -30,8 +30,8 @@ const SOC_LEVELS = [60, 50, 40, 30, 20, 15, 10, 7];
 const INV_CUTOFF_V = 24.0, RESERVE_SOC = 5;
 const SOC_REARM = 3;          // порог снова «взводится», когда заряд поднялся выше него на 3%
 const BMS_STALE_MIN = 10;     // нет данных от платы дольше — сообщаем
-const BMS_SAVE_SEC = 240;     // данные батареи пишем в KV раз в 4 мин (+ сразу при важных событиях)
-// Бюджет записей KV в сутки (лимит 1000): батарея ~360, SmartESS ~144, события/статистика ~50 → ~550
+const BMS_SAVE_SEC = 360;     // данные батареи пишем в KV раз в 6 мин (+ сразу при важных событиях)
+// Бюджет записей KV в сутки (лимит 1000): батарея ~240, SmartESS ~72, события/статистика ~30 → ~350 (35%)
 const ESP_PRIMARY_MIN = 8;    // плата — главный источник света, пока её данные свежее 8 минут
 const APP_PAUSE_MIN = 15;     // на сколько минут плата отпускает Bluetooth для приложения JK
 const GRID_OFF_A = 1.5;       // «света нет» по плате — только если батарея реально разряжается сильнее 1,5 А
@@ -346,7 +346,7 @@ async function handleBms(request, env) {
   // статистика энергии: плата шлёт Вт·ч с момента включения, бот копит по дням
   const today = kyivDay();
   const ps = prev.st || {};
-  const st = ps.day === today ? { ...ps } : { day: today, in: 0, out: 0, tot_out: ps.tot_out || 0 };
+  const st = ps.day === today ? { ...ps } : { day: today, in: 0, out: 0, tot_out: ps.tot_out || 0, tot_in: ps.tot_in || 0 };
   const din = d.e_in == null ? 0 : (prev.e_in != null && d.e_in >= prev.e_in ? d.e_in - prev.e_in : d.e_in);
   const dout = d.e_out == null ? 0 : (prev.e_out != null && d.e_out >= prev.e_out ? d.e_out - prev.e_out : d.e_out);
   b.st = st;
@@ -405,12 +405,22 @@ async function handleBms(request, env) {
       const fl = battFlowRow(b);
       await tgSendAll(env, msg([title], [lh, battHead(b), timeCell(b)].filter(Boolean).join("\n"), fl ? quote([fl]) : null), lvl > 20 ? NIGHT_SILENT : undefined);
     }
+    // начало заряда: запоминаем, с какого % и когда начали (сбрасываем, если батарея снова пошла в разряд)
+    if (b.current > 0.5 && !alerts.cs && soc < 99) { alerts.cs = { soc, at: now, wh: st.tot_in || 0 }; changed = true; }
+    if (b.current < -GRID_OFF_A && alerts.cs) { delete alerts.cs; changed = true; }
     // полный заряд
-    if (soc < 90 && alerts.full) { alerts.full = false; changed = true; }
+    if (soc < 95 && alerts.full) { alerts.full = false; changed = true; }
     if (soc >= 100 && !alerts.full) {
       alerts.full = true; changed = true;
-      await tgSendAll(env, msg(["✅ <b>Батарея заряжена</b>", `🔋 <b>100%</b>  ${bar(100)}`],
-        quote([row("📦", "Ёмкость", `${Math.round(b.remain_ah ?? 0)} А·ч`), row("🔋", "Напряжение", `${f2(b.voltage ?? 0)} В`)])), SILENT);
+      const cs = alerts.cs, R = [];
+      if (cs) {
+        R.push(row(CHG, "", `${Math.round(cs.soc)}% → 100% за ${fmtDuration(now - cs.at)}`));
+        const wh = (st.tot_in || 0) - (cs.wh || 0);
+        if (wh > 10) R.push(row("⚡", "", `зарядили ${kwh(wh)}`));
+      }
+      R.push(row("📦", "Ёмкость", `${Math.round(b.remain_ah ?? 0)} А·ч`), row("🔋", "Напряжение", `${f2(b.voltage ?? 0)} В`));
+      delete alerts.cs;
+      await tgSendAll(env, msg(["✅ <b>Батарея заряжена</b>", `🔋 <b>100%</b>  ${bar(100)}`], quote(R)), SILENT);
     }
     if (changed) await env.STATE.put("soc_alerts", JSON.stringify(alerts));
   }
@@ -420,8 +430,9 @@ async function handleBms(request, env) {
     prev.lost ||
     prev.err !== b.err || prev.chg !== b.chg || prev.dis !== b.dis || (prev.wk && !b.wk) || prev.fw !== b.fw;
   const saving = important || now - prev.at >= BMS_SAVE_SEC;
-  if (saving) { st.in = (st.in || 0) + din; st.out = (st.out || 0) + dout; st.tot_out = (st.tot_out || 0) + dout; }
-  else { b.e_in = prev.e_in; b.e_out = prev.e_out; st.tot_out = (st.tot_out || 0) + dout; } // не сохраняем — дельту учтём при сохранении
+  st.tot_out = (st.tot_out || 0) + dout; st.tot_in = (st.tot_in || 0) + din;
+  if (saving) { st.in = (st.in || 0) + din; st.out = (st.out || 0) + dout; }
+  else { b.e_in = prev.e_in; b.e_out = prev.e_out; } // не сохраняем — дельту учтём при сохранении (итоги выше — только для этого ответа)
   if (saving) {
     if (prev.lost) await tgSendAll(env, msg([`${ICON_BOARD} <b>Плата у батареи снова на связи</b>`], quote([row("⏳", "", `не было данных ${fmtDuration(now - prev.at)}`)])), SILENT);
     await env.STATE.put("bms", JSON.stringify(b));
